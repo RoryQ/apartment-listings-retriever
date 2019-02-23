@@ -2,9 +2,6 @@
   "dependencies": {
     "axios": "^0.18.0",
     "cwait": "^1.1.2",
-    "jsdom": "^13.2.0",
-    "puppeteer": "^1.12.2",
-    "ramda": "^0.26.1",
-    "xpath": "^0.0.27"
+    "ramda": "^0.26.1"
   }
 }

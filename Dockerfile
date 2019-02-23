@@ -8,4 +8,5 @@ RUN yarn
 
 COPY search.js .
 
-ENTRYPOINT ["node" "search.js"]
+
+CMD ["node", "search.js"]
