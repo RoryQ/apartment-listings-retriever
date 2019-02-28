@@ -3,6 +3,7 @@ require("dotenv").config();
 const Axios = require("axios");
 const R = require("ramda");
 const TaskQueue = require("cwait").TaskQueue;
+const natural = require("natural");
 const xpath = require("xpath");
 const DOMParser = require("xmldom").DOMParser;
 const parser = new DOMParser();
@@ -10,11 +11,21 @@ const parser = new DOMParser();
 const mariadb = require("mariadb");
 const pool = mariadb.createPool(process.env.CONN_STRING);
 
+const SlackBots = require("slackbots");
+const slack = new SlackBots({
+    token: process.env.SLACK_TOKEN,
+    name: process.env.SLACK_NAME
+});
+
 const search_url = "https://www.realestate.com.au/rent/property-house-unit+apartment-townhouse-between-0-500-in-melbourne,+vic+3000;+prahran,+vic+3181;+albert+park,+vic+3206;+brighton,+vic+3186;+armadale,+vic+3143/list-1?activeSort=list-date";
+
+const keywords = ["garden", "courtyard", "dishwasher"];
+const stems = R.map(natural.PorterStemmer.stem, keywords);
 
 const regexes = {
     article_id: /<article class.*?id='(?<id>\w+)'/g,
-    article: /(<article.*?<\/article>)/gs
+    article: /(<article.*?<\/article>)/gs,
+    article_page_body: /<p class="body".*?>(.*?)<\/p>/gs
 }
 
 function getMatches(string, regex, index) {
@@ -58,24 +69,38 @@ const tick = (async () => {
     console.log(toProcess);
 });
 
-tick();
-
 async function upsertSearchListing(article) {
     let conn;
     try{
         conn = await pool.getConnection();
         const r = await conn.query(
-            `INSERT INTO listings(id, address, short_details, price_pw, price_raw)
-         value (?,?,?,?,?)
+            `INSERT INTO listings(id, address, short_details, price_pw, price_raw, rooms)
+         value (?,?,?,?,?,?)
          ON DUPLICATE KEY UPDATE
             id=id;`,
-            [article.id, article.address, JSON.stringify(article.details), article.price, article.priceRaw]
+            [article.id, article.address, JSON.stringify(article.details), article.price, article.priceRaw, article.details.Bedrooms]
         );
         console.log(article.id, r);
-        conn.end();
     }
-    catch{
-        conn.end();
+    finally{
+        if (conn) conn.end();
+    }
+}
+
+async function updateDescription(article) {
+    let conn;
+    try {
+        conn = await pool.getConnection();
+        const r = await conn.query(
+            `UPDATE l
+            SET full_description = ? ,
+            notified = ? ,
+            car_space = ? ,
+            `
+        );
+    }
+    finally {
+        if (conn) conn.end();
     }
 }
 
@@ -87,17 +112,31 @@ async function searchListingProcessable(article) {
         conn.end();
         return r.length == 1
     }
-    catch{
-        conn.end();
+    finally{
+        if (conn) conn.end();
     }
 }
 
-(async() => {
-    const article = {
-        id: 425935030,
-        address: "G06/501 Little Collins Street, Melbourne, Vic...",
-        price: '500',
-        priceRaw: "$500 per week",
-        details:  { Bedrooms: '1', Bathrooms: '1' }
-    };
-})();
+async function getDescription(article_id){
+    const r = await Axios.get("http://www.realestate.com.au/" + article_id)
+        .then(x => x.data)
+        .then(x => getMatches(x, regexes.article_page_body, 0)[0])
+    console.log(article_id, r);
+    return r;
+}
+
+async function processSearchListing(article_id){
+    const description = await getDescription(article_id);
+    const hasMatch = R.any(x => R.contains(x, details), stems);
+}
+
+function startSlackBot(){
+    slack.on('message', (data) => {
+        console.log(data);
+    });
+}
+
+startSlackBot();
+
+//(async () => await processSearchListing(425937478))();
+//tick();

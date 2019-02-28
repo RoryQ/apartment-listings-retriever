@@ -3,9 +3,10 @@
     "axios": "^0.18.0",
     "cwait": "^1.1.2",
     "dotenv": "^6.2.0",
-    "fast-xml-parser": "^3.12.13",
     "mariadb": "^2.0.3",
+    "natural": "^0.6.3",
     "ramda": "^0.26.1",
+    "slackbots": "^1.2.0",
     "xmldom": "^0.1.27",
     "xpath": "^0.0.27"
   }
