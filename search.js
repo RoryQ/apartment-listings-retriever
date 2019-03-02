@@ -2,7 +2,6 @@ require("dotenv").config();
 
 const Axios = require("axios");
 const R = require("ramda");
-const TaskQueue = require("cwait").TaskQueue;
 const natural = require("natural");
 const xpath = require("xpath");
 const DOMParser = require("xmldom").DOMParser;
@@ -11,15 +10,18 @@ const parser = new DOMParser();
 const mariadb = require("mariadb");
 const pool = mariadb.createPool(process.env.CONN_STRING);
 
-const SlackBots = require("slackbots");
-const slack = new SlackBots({
-    token: process.env.SLACK_TOKEN,
-    name: process.env.SLACK_NAME
-});
+// slack api
+const token = process.env.SLACK_TOKEN;
+const TurndownService = require('turndown');
+const turndown = new TurndownService();
+const Slack = require('slack');
+const slack = new Slack({token, username: process.env.SLACK_NAME })
 
-const search_url = "https://www.realestate.com.au/rent/property-house-unit+apartment-townhouse-between-0-500-in-melbourne,+vic+3000;+prahran,+vic+3181;+albert+park,+vic+3206;+brighton,+vic+3186;+armadale,+vic+3143/list-1?activeSort=list-date";
+// slack rtm bot
+const slackbots = require('slackbots');
+const bot = new slackbots({token});
 
-const keywords = ["garden", "courtyard", "dishwasher"];
+const keywords = process.env.KEYWORDS.split(',');
 const stems = R.map(natural.PorterStemmer.stem, keywords);
 
 const regexes = {
@@ -54,8 +56,9 @@ function constructRecord(article) {
     };
 }
 
+// main search function
 const tick = (async () => {
-    const details = await Axios.get(search_url)
+    const details = await Axios.get(process.env.SEARCH_URL)
         .then(x => x.data)
         .then(x => getMatches(x, regexes.article, 0))
         .then(x => R.map(y => parser.parseFromString(y), x))
@@ -67,6 +70,7 @@ const tick = (async () => {
     const processable = await Promise.all(R.map(searchListingProcessable, articles));
     const toProcess = R.zipObj(R.pluck("id", articles), processable);
     console.log(toProcess);
+    await Promise.all(R.map(processSearchListing, R.keys(toProcess)));
 });
 
 async function upsertSearchListing(article) {
@@ -74,11 +78,11 @@ async function upsertSearchListing(article) {
     try{
         conn = await pool.getConnection();
         const r = await conn.query(
-            `INSERT INTO listings(id, address, short_details, price_pw, price_raw, rooms)
+            `INSERT INTO listings(id, address, short_details, price_pw, price_raw, rooms, car_space)
          value (?,?,?,?,?,?)
-         ON DUPLICATE KEY UPDATE
-            id=id;`,
-            [article.id, article.address, JSON.stringify(article.details), article.price, article.priceRaw, article.details.Bedrooms]
+         ON DUPLICATE KEY UPDATE id=id;`,
+            [article.id, article.address, JSON.stringify(article.details), article.price,
+                article.priceRaw, article.details.Bedrooms || 1, article.details['Car Spaces'] || 0]
         );
         console.log(article.id, r);
     }
@@ -92,16 +96,33 @@ async function updateDescription(article) {
     try {
         conn = await pool.getConnection();
         const r = await conn.query(
-            `UPDATE l
+            `UPDATE listings
             SET full_description = ? ,
-            notified = ? ,
-            car_space = ? ,
-            `
+            notified_ts = ?,
+            processed = now(),
+            garden = ?
+            WHERE id = ? `,
+            [article.description, article.notified_ts, article.garden || 0, article.id]
         );
+        console.log(article.id, r);
     }
     finally {
         if (conn) conn.end();
     }
+}
+
+async function updateInterest(notified_ts) {
+    let conn
+    try{
+        conn = await pool.getConnection();
+        const r = await conn.query(`update listings set interested = 1 where notified_ts = ?`,
+            [notified_ts]);
+        console.log(notified_ts, r);
+    }
+    finally{
+        if (conn) conn.end();
+    }
+
 }
 
 async function searchListingProcessable(article) {
@@ -118,25 +139,64 @@ async function searchListingProcessable(article) {
 }
 
 async function getDescription(article_id){
+    let resp
+    try{
     const r = await Axios.get("http://www.realestate.com.au/" + article_id)
         .then(x => x.data)
         .then(x => getMatches(x, regexes.article_page_body, 0)[0])
-    console.log(article_id, r);
-    return r;
+        console.log(article_id, r);
+        return r;
+    }
+    catch (e){
+        printAxiosError(e)
+        return null;
+    }
+}
+
+function printAxiosError(e) {
+    if (e.response){
+        console.error(e.response.status, e.response.statusText);
+    }
+    else if (e.message){
+        console.error(e.message);
+    }
 }
 
 async function processSearchListing(article_id){
     const description = await getDescription(article_id);
-    const hasMatch = R.any(x => R.contains(x, details), stems);
+    if (description) {
+        var hasMatch = R.any(x => R.contains(x, description), stems);
+    }
+    let article = {
+        description: description,
+        id: article_id
+    };
+    if (hasMatch) {
+        const ts = await postToSlack(article);
+        console.log(ts);
+        article = { ...article, notified_ts: ts}
+    }
+    console.log(article);
+    await updateDescription(article);
+}
+
+async function postToSlack(article){
+    let m = await slack.chat.postMessage({channel:'listings',
+        text:`https://www.realestate.com.au/${article.id}
+${turndown.turndown(article.description)}`})
+    return m.ts;
 }
 
 function startSlackBot(){
-    slack.on('message', (data) => {
+    bot.on('message', (data) => {
         console.log(data);
+
+        if (data.type === 'reaction_added'){
+            updateInterest(data.item.ts);
+        }
     });
 }
 
-startSlackBot();
 
-//(async () => await processSearchListing(425937478))();
-//tick();
+startSlackBot();
+setInterval(tick, 1000 * 60 * 15);
