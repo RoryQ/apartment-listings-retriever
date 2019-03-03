@@ -12,8 +12,6 @@ const pool = mariadb.createPool(process.env.CONN_STRING);
 
 // slack api
 const token = process.env.SLACK_TOKEN;
-const TurndownService = require('turndown');
-const turndown = new TurndownService();
 const Slack = require('slack');
 const slack = new Slack({token, username: process.env.SLACK_NAME })
 
@@ -65,12 +63,13 @@ const tick = (async () => {
         .then(x => R.map(y => constructRecord(y) ,x));
 
     const articles = await details;
+    console.log(articles);
 
     await Promise.all(R.map(upsertSearchListing, articles));
     const processable = await Promise.all(R.map(searchListingProcessable, articles));
     const toProcess = R.zipObj(R.pluck("id", articles), processable);
     console.log(toProcess);
-    await Promise.all(R.map(processSearchListing, R.keys(toProcess)));
+    await Promise.all(R.map(notifyIfGoodEnough, R.keys(toProcess)));
 });
 
 async function upsertSearchListing(article) {
@@ -78,11 +77,15 @@ async function upsertSearchListing(article) {
     try{
         conn = await pool.getConnection();
         const r = await conn.query(
-            `INSERT INTO listings(id, address, short_details, price_pw, price_raw, rooms, car_space)
-         value (?,?,?,?,?,?)
-         ON DUPLICATE KEY UPDATE id=id;`,
-            [article.id, article.address, JSON.stringify(article.details), article.price,
-                article.priceRaw, article.details.Bedrooms || 1, article.details['Car Spaces'] || 0]
+`INSERT INTO listings(
+    id, address, short_details, 
+    price_pw, price_raw, rooms, 
+    car_space)
+value (?,?,?, ?,?,?, ?)
+ON DUPLICATE KEY UPDATE id=id;`,
+            [article.id, article.address, JSON.stringify(article.details), 
+             article.price, article.priceRaw, article.details.Bedrooms || 1, 
+             !!article.details['Car Spaces'] || 0]
         );
         console.log(article.id, r);
     }
@@ -96,13 +99,12 @@ async function updateDescription(article) {
     try {
         conn = await pool.getConnection();
         const r = await conn.query(
-            `UPDATE listings
-            SET full_description = ? ,
-            notified_ts = ?,
-            processed = now(),
-            garden = ?
-            WHERE id = ? `,
-            [article.description, article.notified_ts, article.garden || 0, article.id]
+`UPDATE listings
+SET full_description = ? ,
+processed = now(),
+garden = ?
+WHERE id = ? `,
+            [article.description, article.garden || 0, article.id]
         );
         console.log(article.id, r);
     }
@@ -122,7 +124,19 @@ async function updateInterest(notified_ts) {
     finally{
         if (conn) conn.end();
     }
+}
 
+async function updateNotified(article) {
+    let conn
+    try{
+        conn = await pool.getConnection();
+        const r = await conn.query(`update listings set notified_ts = ? where id = ?`,
+            [Number(article.notified_ts), article.id]);
+        console.log(notified_ts, r);
+    }
+    finally{
+        if (conn) conn.end();
+    }
 }
 
 async function searchListingProcessable(article) {
@@ -132,6 +146,18 @@ async function searchListingProcessable(article) {
         const r = await conn.query(`select 1 from listings where id = ? and processed is null`, [article.id]);
         conn.end();
         return r.length == 1
+    }
+    finally{
+        if (conn) conn.end();
+    }
+}
+
+async function getArticleRecord(id){
+    let conn;
+    try{
+        conn = await pool.getConnection();
+        const r = await conn.query(`select id, address, rooms, car_space, garden, price_raw, notified_ts from listings where id = ?`, [id]);
+        return r[0];
     }
     finally{
         if (conn) conn.end();
@@ -162,28 +188,43 @@ function printAxiosError(e) {
     }
 }
 
-async function processSearchListing(article_id){
+async function notifyIfGoodEnough(article_id){
+    let article = {id: article_id};
     const description = await getDescription(article_id);
     if (description) {
+        article = { ...article, description };
+        await updateDescription(article);
         var hasMatch = R.any(x => R.contains(x, description), stems);
     }
-    let article = {
-        description: description,
-        id: article_id
-    };
-    if (hasMatch) {
-        const ts = await postToSlack(article);
-        console.log(ts);
-        article = { ...article, notified_ts: ts}
-    }
+    if (!hasMatch) 
+        return;
+
+    console.log(article.id, 'hasMatch: true');
+    article = await getArticleRecord(article.id);
+    if (!!article.notified_ts) 
+        return;
+
+    const garden = R.contains('garden', description);
+    article = {...article, garden};
     console.log(article);
-    await updateDescription(article);
+    const ts = await postToSlack(article);
+    console.log(article.id, ts);
+    article = { ...article, notified_ts: ts }
+    await updateNotified(article);
 }
+
+const booleanEmojii = (value) => value ? ':heavy_check_mark:' : ':x:';
 
 async function postToSlack(article){
     let m = await slack.chat.postMessage({channel:'listings',
-        text:`https://www.realestate.com.au/${article.id}
-${turndown.turndown(article.description)}`})
+        text:
+`${article.address}
+${article.price_raw} 
+rooms: ${article.rooms} 
+car_space: ${booleanEmojii(!!article.car_space)}
+garden: ${booleanEmojii(!!article.garden)}
+https://www.realestate.com.au/${article.id}
+`})
     return m.ts;
 }
 
@@ -199,4 +240,6 @@ function startSlackBot(){
 
 
 startSlackBot();
-setInterval(tick, 1000 * 60 * 15);
+intervalMins = process.env.INTERVAL_MINS
+setInterval(tick, 1000 * 60 * intervalMins);
+tick();
