@@ -78,13 +78,13 @@ async function upsertSearchListing(article) {
         conn = await pool.getConnection();
         const r = await conn.query(
 `INSERT INTO listings(
-    id, address, short_details, 
-    price_pw, price_raw, rooms, 
+    id, address, short_details,
+    price_pw, price_raw, rooms,
     car_space)
 value (?,?,?, ?,?,?, ?)
 ON DUPLICATE KEY UPDATE id=id;`,
-            [article.id, article.address, JSON.stringify(article.details), 
-             article.price, article.priceRaw, article.details.Bedrooms || 1, 
+            [article.id, article.address, JSON.stringify(article.details),
+             article.price, article.priceRaw, article.details.Bedrooms || 1,
              !!article.details['Car Spaces'] || 0]
         );
         console.log(article.id, r);
@@ -196,12 +196,12 @@ async function notifyIfGoodEnough(article_id){
         await updateDescription(article);
         var hasMatch = R.any(x => R.contains(x, description), stems);
     }
-    if (!hasMatch) 
+    if (!hasMatch)
         return;
 
     console.log(article.id, 'hasMatch: true');
     article = await getArticleRecord(article.id);
-    if (!!article.notified_ts) 
+    if (!!article.notified_ts)
         return;
 
     const garden = R.contains('garden', description);
@@ -219,12 +219,13 @@ async function postToSlack(article){
     let m = await slack.chat.postMessage({channel:'listings',
         text:
 `${article.address}
-${article.price_raw} 
-rooms: ${article.rooms} 
+${article.price_raw}
+rooms: ${article.rooms}
 car_space: ${booleanEmojii(!!article.car_space)}
 garden: ${booleanEmojii(!!article.garden)}
 https://www.realestate.com.au/${article.id}
-`})
+`,
+        as_user: true});
     return m.ts;
 }
 
@@ -240,6 +241,9 @@ function startSlackBot(){
 
 
 startSlackBot();
-intervalMins = process.env.INTERVAL_MINS
+intervalMins = process.env.INTERVAL_MINS;
 setInterval(tick, 1000 * 60 * intervalMins);
 tick();
+
+
+
